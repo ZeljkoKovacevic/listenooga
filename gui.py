@@ -164,7 +164,7 @@ class ListenoogaApp:
         self.stream_translate_check.grid(row=12, column=1, sticky="w", pady=2)
 
         ttk.Label(main, text="Mic-Gain (x):").grid(row=13, column=0, sticky="w")
-        self.mic_gain_var = tk.DoubleVar(value=50.0)
+        self.mic_gain_var = tk.DoubleVar(value=5.0)
         self.mic_gain_spin = ttk.Spinbox(
             main,
             from_=0.1,
@@ -241,19 +241,33 @@ class ListenoogaApp:
     def _load_devices(self) -> None:
         try:
             mics = sc.all_microphones(include_loopback=False)
-            loop_mics = sc.all_microphones(include_loopback=True)
+            all_mics = sc.all_microphones(include_loopback=True)
             speakers = sc.all_speakers()
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Fehler", f"Audio-Devices konnten nicht geladen werden:\n{e}")
             return
 
-        self._mic_devices = list(mics)
-        self._loop_devices = list(loop_mics)
+        input_mics: list[object] = []
+        output_mics: list[object] = []
+        other_mics: list[object] = []
+        for dev in list(all_mics):
+            role = self._windows_device_role(getattr(dev, "id", ""))
+            if role == "input":
+                input_mics.append(dev)
+            elif role == "output":
+                output_mics.append(dev)
+            else:
+                other_mics.append(dev)
+
+        self._mic_devices = list(input_mics) if input_mics else list(mics)
+        if other_mics:
+            self._mic_devices.extend(other_mics)
+        self._loop_devices = list(output_mics) if output_mics else list(all_mics)
         self._speaker_devices = list(speakers)
 
-        mic_choices = [f"[{idx}] {dev.name}" for idx, dev in enumerate(self._mic_devices)]
-        loop_choices = [f"[{idx}] {dev.name}" for idx, dev in enumerate(self._loop_devices)]
-        out_choices = [f"[{idx}] {dev.name}" for idx, dev in enumerate(self._speaker_devices)]
+        mic_choices = [self._format_device_label(dev, idx) for idx, dev in enumerate(self._mic_devices)]
+        loop_choices = [self._format_device_label(dev, idx) for idx, dev in enumerate(self._loop_devices)]
+        out_choices = [self._format_device_label(dev, idx) for idx, dev in enumerate(self._speaker_devices)]
 
         self.mic_combo["values"] = mic_choices
         self.loop_combo["values"] = loop_choices
@@ -278,6 +292,41 @@ class ListenoogaApp:
             return int(entry[start:end])
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"Konnte Device-Index nicht aus '{entry}' lesen") from e
+
+    def _format_device_label(self, dev, idx: int) -> str:
+        dev_id = getattr(dev, "id", "")
+        if dev_id:
+            short_id = self._short_device_id(dev_id)
+            if short_id:
+                return f"[{idx}] {dev.name} ({short_id})"
+            return f"[{idx}] {dev.name} ({dev_id})"
+        return f"[{idx}] {dev.name}"
+
+    def _short_device_id(self, dev_id: str) -> str:
+        token = dev_id
+        if "{" in token and "}" in token:
+            token = token[token.find("{") + 1 : token.find("}")]
+        parts = token.split(".")
+        if len(parts) >= 3:
+            return ".".join(parts[:3])
+        return ""
+
+    def _windows_device_role(self, dev_id: str) -> str | None:
+        if not dev_id:
+            return None
+        try:
+            token = dev_id
+            if "{" in token and "}" in token:
+                token = token[token.find("{") + 1 : token.find("}")]
+            parts = token.split(".")
+            if len(parts) >= 3 and parts[0] == "0" and parts[1] == "0":
+                if parts[2] == "0":
+                    return "output"
+                if parts[2] == "1":
+                    return "input"
+        except Exception:  # noqa: BLE001
+            return None
+        return None
 
     def start_recording(self) -> None:
         if self.is_recording:
@@ -410,7 +459,7 @@ class ListenoogaApp:
     def _find_loopback_microphone(self, speaker_dev):
         try:
             mic = sc.get_microphone(speaker_dev.name, include_loopback=True)
-            if mic is not None:
+            if mic is not None and self._windows_device_role(getattr(mic, "id", "")) == "output":
                 return mic
         except Exception:  # noqa: BLE001
             mic = None
@@ -420,11 +469,18 @@ class ListenoogaApp:
         except Exception:  # noqa: BLE001
             return None
 
+        loopbacks = [
+            m
+            for m in all_mics
+            if self._windows_device_role(getattr(m, "id", "")) == "output"
+        ]
         speaker_name = speaker_dev.name.lower()
-        for m in all_mics:
+        for m in loopbacks:
             name = m.name.lower()
-            if speaker_name in name and ("loopback" in name or "loop-back" in name):
+            if speaker_name in name:
                 return m
+        if loopbacks:
+            return loopbacks[0]
 
         for m in all_mics:
             name = m.name.lower()
